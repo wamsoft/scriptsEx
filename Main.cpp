@@ -2,6 +2,8 @@
 #include <vector>
 #include <algorithm>
 
+#include "bitap_fuzzy.hpp"
+
 /**
  * メソッド追加用
  */
@@ -78,6 +80,13 @@ public:
 													 tjs_int numparams,
 													 tTJSVariant **param,
 													 iTJSDispatch2 *objthis);
+
+	//----------------------------------------------------------------------
+	// あいまい文字列検索（bitapアルゴリズムによる）
+	static tjs_error TJS_INTF_METHOD stringFuzzySearch(tTJSVariant *result,
+													   tjs_int numparams,
+													   tTJSVariant **param,
+													   iTJSDispatch2 *objthis);
 
 private:
 		/**
@@ -609,7 +618,8 @@ ScriptsAdd::clone(tTJSVariant obj)
 	if (obj.Type() == tvtObject) {
 
 		tTJSVariantClosure &o1 = obj.AsObjectClosureNoAddRef();
-		
+		if (!o1.Object) return obj; // nullなら無視
+
 		// Arrayの複製
 		if (o1.IsInstanceOf(0, NULL, NULL, L"Array", NULL)== TJS_S_TRUE) {
 			iTJSDispatch2 *array = TJSCreateArrayObject();
@@ -743,6 +753,33 @@ ScriptsAdd::safeEvalStorage(tTJSVariant *result,
 	return TJS_S_OK;
 }
 //----------------------------------------------------------------------
+// あいまい文字列検索（bitapアルゴリズムによる）
+tjs_error TJS_INTF_METHOD
+ScriptsAdd::stringFuzzySearch(tTJSVariant *result,
+							  tjs_int numparams,
+							  tTJSVariant **param,
+							  iTJSDispatch2 *objthis)
+{
+	if(numparams < 3) return TJS_E_BADPARAMCOUNT;
+
+	ttstr text   (*param[0]);
+	ttstr pattern(*param[1]);
+	tjs_int const maxign = *param[2];
+	tjs_int const chbits = (numparams > 3 && param[3]->Type() != tvtVoid) ? *param[3] : 7;
+
+	tjs_int const plen = pattern.length();
+	if (plen >= 64 || maxign < 0 || chbits <= 0 || chbits > 16) return TJS_E_INVALIDPARAM;
+
+	tjs_int index = 0;
+	if (plen < 32) {
+		index = bitap_fuzzy_bitwise_search<tjs_char, tjs_uint32>(text.c_str(), text.length(), pattern.c_str(), plen, maxign, chbits);
+	} else {
+		index = bitap_fuzzy_bitwise_search<tjs_char, tjs_uint64>(text.c_str(), text.length(), pattern.c_str(), plen, maxign, chbits);
+	}
+	if (result) *result = index;
+	return TJS_S_OK;
+}
+//----------------------------------------------------------------------
 NCB_ATTACH_CLASS(ScriptsAdd, Scripts) {
 	RawCallback(TJS_W("getObjectKeys"), &ScriptsAdd::getKeys, TJS_STATICMEMBER);
 	RawCallback(TJS_W("getObjectCount"), &ScriptsAdd::getCount, TJS_STATICMEMBER);
@@ -764,6 +801,7 @@ NCB_ATTACH_CLASS(ScriptsAdd, Scripts) {
 
 	RawCallback(TJS_W("safeEvalStorage"), &ScriptsAdd::safeEvalStorage, TJS_STATICMEMBER);
 
+	RawCallback(TJS_W("stringFuzzySearch"), &ScriptsAdd::stringFuzzySearch, TJS_STATICMEMBER);
 };
 
 NCB_ATTACH_FUNCTION(rehash, Scripts, TJSDoRehash);
