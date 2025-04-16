@@ -766,7 +766,7 @@ ScriptsAdd::stringFuzzySearch(tTJSVariant *result,
 	ttstr text   (*param[0]);
 	ttstr pattern(*param[1]);
 	tjs_int const maxign = *param[2];
-	tjs_int const chbits = (numparams > 3 && param[3]->Type() != tvtVoid) ? *param[3] : 7;
+	tjs_int const chbits = (numparams > 3 && param[3]->Type() != tvtVoid) ? (tjs_int)(tTVInteger)*param[3] : (tjs_int)7;
 
 	tjs_int const plen = pattern.length();
 	if (plen >= 64 || maxign < 0 || chbits <= 0 || chbits > 16) return TJS_E_INVALIDPARAM;
