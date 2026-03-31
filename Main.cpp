@@ -1,6 +1,7 @@
 #include "ncbind.hpp"
 #include <vector>
 #include <algorithm>
+#include <cstring>
 
 #include "bitap_fuzzy.hpp"
 
@@ -113,7 +114,7 @@ public:
 												) {
 		if (numparams > 1) {
 			tTVInteger flag = param[1]->AsInteger();
-			static tjs_uint addHint = NULL;
+			static tjs_uint addHint = 0;
 			if (!(flag & TJS_HIDDENMEMBER)) {
 				array->FuncCall(0, TJS_W("add"), &addHint, 0, 1, &param[0], array);
 			}
@@ -292,7 +293,7 @@ ScriptsAdd::_getKeys(tTJSVariant *result, tTJSVariant &obj)
 		tTJSVariantClosure closure(caller);
 		obj.AsObjectClosureNoAddRef().EnumMembers(TJS_IGNOREPROP|TJS_ENUM_NO_VALUE, &closure, NULL);
 		caller->Release();
-		static tjs_uint sortHint = NULL;
+		static tjs_uint sortHint = 0;
 		// 返すキーはソートする
 		array->FuncCall(0, TJS_W("sort"), &sortHint, 0, 0, 0, array);
 		*result = tTJSVariant(array, array);
@@ -766,7 +767,7 @@ ScriptsAdd::stringFuzzySearch(tTJSVariant *result,
 	ttstr text   (*param[0]);
 	ttstr pattern(*param[1]);
 	tjs_int const maxign = *param[2];
-	tjs_int const chbits = (numparams > 3 && param[3]->Type() != tvtVoid) ? *param[3] : 7;
+	tjs_int const chbits = (numparams > 3 && param[3]->Type() != tvtVoid) ? (tjs_int)*param[3] : (tjs_int)7;
 
 	tjs_int const plen = pattern.length();
 	if (plen >= 64 || maxign < 0 || chbits <= 0 || chbits > 16) return TJS_E_INVALIDPARAM;
