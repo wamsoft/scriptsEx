@@ -338,7 +338,7 @@ ScriptsAdd::getCount(tTJSVariant *result,
 {
 	if (numparams < 1) return TJS_E_BADPARAMCOUNT;
 	if (result) {
-		tjs_int count;
+		tjs_int count = 0;
 		param[0]->AsObjectClosureNoAddRef().GetCount(&count, NULL, NULL, NULL);
 		*result = count;
 	}
@@ -602,8 +602,10 @@ ScriptsAdd::getMD5HashString(tTJSVariant *result,
 							 tTJSVariant **param,
 							 iTJSDispatch2 *objthis) {
 	if (numparams < 1) return TJS_E_BADPARAMCOUNT;
+	if (param[0]->Type() != tvtOctet) return TJS_E_INVALIDPARAM;
 
 	tTJSVariantOctet *octet = param[0]->AsOctetNoAddRef();
+	if (!octet) return TJS_E_INVALIDPARAM;
 
 	TVP_md5_state_t st;
 	TVP_md5_init(&st);
@@ -759,6 +761,7 @@ ScriptsAdd::safeEvalStorage(tTJSVariant *result,
 							iTJSDispatch2 *objthis)
 {
 	if(numparams < 1) return TJS_E_BADPARAMCOUNT;
+	if (result) result->Clear();
 
 	ttstr name = *param[0];
 
