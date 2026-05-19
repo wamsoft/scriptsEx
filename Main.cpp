@@ -2,8 +2,38 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include <set>
+#include <map>
+#include <utility>
 
 #include "bitap_fuzzy.hpp"
+
+//----------------------------------------------------------------------
+// 循環参照検出用 visited (thread_local + RAII)
+// equalStruct / clone の再帰中に同じ Dispatch ペア / Dispatch を再訪したら
+// 「等しい」もしくは「既存クローン」を返してスタックオーバーフロー回避。
+namespace {
+	struct EqualVisited {
+		typedef std::pair<iTJSDispatch2*, iTJSDispatch2*> KeyT;
+		typedef std::set<KeyT> SetT;
+		static thread_local int depth;
+		static thread_local SetT seen;
+		EqualVisited() { if (depth == 0) seen.clear(); ++depth; }
+		~EqualVisited() { --depth; if (depth == 0) seen.clear(); }
+	};
+	thread_local int EqualVisited::depth = 0;
+	thread_local EqualVisited::SetT EqualVisited::seen;
+
+	struct CloneVisited {
+		typedef std::map<iTJSDispatch2*, iTJSDispatch2*> MapT;
+		static thread_local int depth;
+		static thread_local MapT seen;
+		CloneVisited() { if (depth == 0) seen.clear(); ++depth; }
+		~CloneVisited() { --depth; if (depth == 0) seen.clear(); }
+	};
+	thread_local int CloneVisited::depth = 0;
+	thread_local CloneVisited::MapT CloneVisited::seen;
+}
 
 /**
  * メソッド追加用
@@ -113,9 +143,9 @@ public:
 												iTJSDispatch2 *objthis		// object as "this"
 												) {
 		if (numparams > 1) {
-			tTVInteger flag = param[1]->AsInteger();
+			tTVInteger memberFlag = param[1]->AsInteger();
 			static tjs_uint addHint = 0;
-			if (!(flag & TJS_HIDDENMEMBER)) {
+			if (!(memberFlag & TJS_HIDDENMEMBER)) {
 				array->FuncCall(0, TJS_W("add"), &addHint, 0, 1, &param[0], array);
 			}
 		}
@@ -128,26 +158,6 @@ protected:
 	iTJSDispatch2 *array;
 };
 
-
-//----------------------------------------------------------------------
-// 辞書を作成
-tTJSVariant createDictionary(void)
-{
-	iTJSDispatch2 *obj = TJSCreateDictionaryObject();
-	tTJSVariant result(obj, obj);
-	obj->Release();
-	return result;
-}
-
-//----------------------------------------------------------------------
-// 配列を作成
-tTJSVariant createArray(void)
-{
-	iTJSDispatch2 *obj = TJSCreateArrayObject();
-	tTJSVariant result(obj, obj);
-	obj->Release();
-	return result;
-}
 
 //----------------------------------------------------------------------
 // 辞書の要素を全比較するCaller
@@ -289,14 +299,26 @@ ScriptsAdd::_getKeys(tTJSVariant *result, tTJSVariant &obj)
 {
 	if (result) {
 		iTJSDispatch2 *array = TJSCreateArrayObject();
-		DictMemberGetCaller *caller = new DictMemberGetCaller(array);
-		tTJSVariantClosure closure(caller);
-		obj.AsObjectClosureNoAddRef().EnumMembers(TJS_IGNOREPROP|TJS_ENUM_NO_VALUE, &closure, NULL);
+		DictMemberGetCaller *caller;
+		try {
+			caller = new DictMemberGetCaller(array);
+		} catch(...) {
+			array->Release();
+			throw;
+		}
+		try {
+			tTJSVariantClosure closure(caller);
+			obj.AsObjectClosureNoAddRef().EnumMembers(TJS_IGNOREPROP|TJS_ENUM_NO_VALUE, &closure, NULL);
+			static tjs_uint sortHint = 0;
+			// 返すキーはソートする
+			array->FuncCall(0, TJS_W("sort"), &sortHint, 0, 0, 0, array);
+			*result = tTJSVariant(array, array);
+		} catch(...) {
+			caller->Release();
+			array->Release();
+			throw;
+		}
 		caller->Release();
-		static tjs_uint sortHint = 0;
-		// 返すキーはソートする
-		array->FuncCall(0, TJS_W("sort"), &sortHint, 0, 0, 0, array);
-		*result = tTJSVariant(array, array);
 		array->Release();
 	}
 }
@@ -326,7 +348,7 @@ ScriptsAdd::getCount(tTJSVariant *result,
 {
 	if (numparams < 1) return TJS_E_BADPARAMCOUNT;
 	if (result) {
-		tjs_int count;
+		tjs_int count = 0;
 		param[0]->AsObjectClosureNoAddRef().GetCount(&count, NULL, NULL, NULL);
 		*result = count;
 	}
@@ -358,11 +380,19 @@ ScriptsAdd::isNullContext(tTJSVariant obj)
 bool
 ScriptsAdd::equalStruct(tTJSVariant v1, tTJSVariant v2)
 {
+	EqualVisited scope;
 	// タイプがオブジェクトなら特殊判定
 	if (v1.Type() == tvtObject
 		&& v2.Type() == tvtObject) {
-		if (v1.AsObjectNoAddRef() == v2.AsObjectNoAddRef())
+		iTJSDispatch2 *p1 = v1.AsObjectNoAddRef();
+		iTJSDispatch2 *p2 = v2.AsObjectNoAddRef();
+		if (p1 == p2)
 			return true;
+
+		// 循環: 既に (p1,p2) を比較中なら同型とみなして true を返す
+		EqualVisited::KeyT key(p1, p2);
+		if (EqualVisited::seen.count(key)) return true;
+		EqualVisited::seen.insert(key);
 
 		tTJSVariantClosure &o1 = v1.AsObjectClosureNoAddRef();
 		tTJSVariantClosure &o2 = v2.AsObjectClosureNoAddRef();
@@ -405,9 +435,15 @@ ScriptsAdd::equalStruct(tTJSVariant v1, tTJSVariant v2)
 			}
 			// 全項目を順番に比較
 			DictMemberCompareCaller *caller = new DictMemberCompareCaller(o2);
-			tTJSVariantClosure closure(caller);
-			tTJSVariant(o1.EnumMembers(TJS_IGNOREPROP, &closure, NULL));
-			bool result = caller->match;
+			bool result;
+			try {
+				tTJSVariantClosure closure(caller);
+				tTJSVariant(o1.EnumMembers(TJS_IGNOREPROP, &closure, NULL));
+				result = caller->match;
+			} catch(...) {
+				caller->Release();
+				throw;
+			}
 			caller->Release();
 			return result;
 		}
@@ -421,11 +457,19 @@ ScriptsAdd::equalStruct(tTJSVariant v1, tTJSVariant v2)
 bool
 ScriptsAdd::equalStructNumericLoose(tTJSVariant v1, tTJSVariant v2)
 {
+	EqualVisited scope;
 	// タイプがオブジェクトなら特殊判定
 	if (v1.Type() == tvtObject
 		&& v2.Type() == tvtObject) {
-		if (v1.AsObjectNoAddRef() == v2.AsObjectNoAddRef())
+		iTJSDispatch2 *p1 = v1.AsObjectNoAddRef();
+		iTJSDispatch2 *p2 = v2.AsObjectNoAddRef();
+		if (p1 == p2)
 			return true;
+
+		// 循環: 既に (p1,p2) を比較中なら同型とみなして true を返す
+		EqualVisited::KeyT key(p1, p2);
+		if (EqualVisited::seen.count(key)) return true;
+		EqualVisited::seen.insert(key);
 
 		tTJSVariantClosure &o1 = v1.AsObjectClosureNoAddRef();
 		tTJSVariantClosure &o2 = v2.AsObjectClosureNoAddRef();
@@ -467,9 +511,15 @@ ScriptsAdd::equalStructNumericLoose(tTJSVariant v1, tTJSVariant v2)
 				return false;
 			// 全項目を順番に比較
 			DictMemberCompareNumericLooseCaller *caller = new DictMemberCompareNumericLooseCaller(o2);
-			tTJSVariantClosure closure(caller);
-			tTJSVariant(o1.EnumMembers(TJS_IGNOREPROP, &closure, NULL));
-			bool result = caller->match;
+			bool result;
+			try {
+				tTJSVariantClosure closure(caller);
+				tTJSVariant(o1.EnumMembers(TJS_IGNOREPROP, &closure, NULL));
+				result = caller->match;
+			} catch(...) {
+				caller->Release();
+				throw;
+			}
 			caller->Release();
 			return result;
 		}
@@ -508,45 +558,59 @@ ScriptsAdd::foreach(tTJSVariant *result,
 
 		tTJSVariant key, value;
 		tTJSVariant **paramList = new tTJSVariant *[numparams];
-		paramList[0] = &key;
-		paramList[1] = &value;
-		for (tjs_int i = 2; i < numparams; i++)
-			paramList[i] = param[i];
+		try {
+			paramList[0] = &key;
+			paramList[1] = &value;
+			for (tjs_int i = 2; i < numparams; i++)
+				paramList[i] = param[i];
 
-		tTJSVariant arrayCount;
-		(void)obj.PropGet(0, TJS_W("count"), &countHint, &arrayCount, NULL);
-		tjs_int count = arrayCount;
+			tTJSVariant arrayCount;
+			(void)obj.PropGet(0, TJS_W("count"), &countHint, &arrayCount, NULL);
+			tjs_int count = arrayCount;
 
-		tTJSVariant breakResult;
-		for (tjs_int i = 0; i < count; i++) {
-			key = i;
-			breakResult.Clear();
-			(void)obj.PropGetByNum(TJS_IGNOREPROP, i, &value, NULL);
-			(void)func->FuncCall(0, NULL, NULL, &breakResult, numparams, paramList, functhis);
-			if (breakResult.Type() != tvtVoid) {
-				break;
+			tTJSVariant breakResult;
+			for (tjs_int i = 0; i < count; i++) {
+				key = i;
+				breakResult.Clear();
+				(void)obj.PropGetByNum(TJS_IGNOREPROP, i, &value, NULL);
+				(void)func->FuncCall(0, NULL, NULL, &breakResult, numparams, paramList, functhis);
+				if (breakResult.Type() != tvtVoid) {
+					break;
+				}
 			}
+			if (result) {
+				*result = breakResult;
+			}
+		} catch(...) {
+			delete[] paramList;
+			throw;
 		}
-		if (result) {
-			*result = breakResult;
-		}
-		
 		delete[] paramList;
 
 	} else {
 
 		tTJSVariant **paramList = new tTJSVariant *[numparams];
-		for (tjs_int i = 2; i < numparams; i++)
-			paramList[i] = param[i];
-
-		DictIterateCaller *caller = new DictIterateCaller(func, functhis, paramList, numparams);
-		tTJSVariantClosure closure(caller);
-		obj.EnumMembers(TJS_IGNOREPROP, &closure, NULL);
-		if (result) {
-			*result = caller->breakResult;
+		DictIterateCaller *caller;
+		try {
+			for (tjs_int i = 2; i < numparams; i++)
+				paramList[i] = param[i];
+			caller = new DictIterateCaller(func, functhis, paramList, numparams);
+		} catch(...) {
+			delete[] paramList;
+			throw;
+		}
+		try {
+			tTJSVariantClosure closure(caller);
+			obj.EnumMembers(TJS_IGNOREPROP, &closure, NULL);
+			if (result) {
+				*result = caller->breakResult;
+			}
+		} catch(...) {
+			caller->Release();
+			delete[] paramList;
+			throw;
 		}
 		caller->Release();
-
 		delete[] paramList;
 	}
 	return TJS_S_OK;
@@ -564,8 +628,10 @@ ScriptsAdd::getMD5HashString(tTJSVariant *result,
 							 tTJSVariant **param,
 							 iTJSDispatch2 *objthis) {
 	if (numparams < 1) return TJS_E_BADPARAMCOUNT;
+	if (param[0]->Type() != tvtOctet) return TJS_E_INVALIDPARAM;
 
 	tTJSVariantOctet *octet = param[0]->AsOctetNoAddRef();
+	if (!octet) return TJS_E_INVALIDPARAM;
 
 	TVP_md5_state_t st;
 	TVP_md5_init(&st);
@@ -616,37 +682,66 @@ protected:
 tTJSVariant
 ScriptsAdd::clone(tTJSVariant obj)
 {
+	CloneVisited scope;
 	// タイプがオブジェクトなら細かく判定
 	if (obj.Type() == tvtObject) {
 
 		tTJSVariantClosure &o1 = obj.AsObjectClosureNoAddRef();
 		if (!o1.Object) return obj; // nullなら無視
 
+		// 循環: 既にクローン済の source なら同じクローンを返す
+		{
+			CloneVisited::MapT::iterator it = CloneVisited::seen.find(o1.Object);
+			if (it != CloneVisited::seen.end()) {
+				iTJSDispatch2 *cloned = it->second;
+				return tTJSVariant(cloned, cloned);
+			}
+		}
+
 		// Arrayの複製
 		if (o1.IsInstanceOf(0, NULL, NULL, TJS_W("Array"), NULL)== TJS_S_TRUE) {
 			iTJSDispatch2 *array = TJSCreateArrayObject();
-			tTJSVariant o1Count;
-			(void)o1.PropGet(0, TJS_W("count"), &countHint, &o1Count, NULL);
-			tjs_int count = o1Count;
-			tTJSVariant val;
-			tTJSVariant *args[] = {&val};
-			for (tjs_int i = 0; i < count; i++) {
-				(void)o1.PropGetByNum(TJS_IGNOREPROP, i, &val, NULL);
-				val = ScriptsAdd::clone(val);
-				static tjs_uint addHint = 0;
-				(void)array->FuncCall(0, TJS_W("add"), &addHint, 0, 1, args, array);
+			CloneVisited::seen[o1.Object] = array;
+			try {
+				tTJSVariant o1Count;
+				(void)o1.PropGet(0, TJS_W("count"), &countHint, &o1Count, NULL);
+				tjs_int count = o1Count;
+				tTJSVariant val;
+				tTJSVariant *args[] = {&val};
+				for (tjs_int i = 0; i < count; i++) {
+					(void)o1.PropGetByNum(TJS_IGNOREPROP, i, &val, NULL);
+					val = ScriptsAdd::clone(val);
+					static tjs_uint addHint = 0;
+					(void)array->FuncCall(0, TJS_W("add"), &addHint, 0, 1, args, array);
+				}
+				tTJSVariant result(array, array);
+				array->Release();
+				return result;
+			} catch(...) {
+				array->Release();
+				throw;
 			}
-			tTJSVariant result(array, array);
-			array->Release();
-			return result;
 		}
-		
+
 		// Dictionaryの複製
 		if (o1.IsInstanceOf(0, NULL, NULL, TJS_W("Dictionary"), NULL)== TJS_S_TRUE) {
 			iTJSDispatch2 *dict = TJSCreateDictionaryObject();
-			DictMemberCloneCaller *caller = new DictMemberCloneCaller(dict);
-			tTJSVariantClosure closure(caller);
-			o1.EnumMembers(TJS_IGNOREPROP, &closure, NULL);
+			CloneVisited::seen[o1.Object] = dict;
+			DictMemberCloneCaller *caller;
+			try {
+				caller = new DictMemberCloneCaller(dict);
+			} catch(...) {
+				dict->Release();
+				throw;
+			}
+			try {
+				tTJSVariantClosure closure(caller);
+				o1.EnumMembers(TJS_IGNOREPROP, &closure, NULL);
+			} catch(...) {
+				caller->Release();
+				dict->Release();
+				throw;
+			}
 			caller->Release();
 			tTJSVariant result(dict, dict);
 			dict->Release();
@@ -704,6 +799,7 @@ ScriptsAdd::safeEvalStorage(tTJSVariant *result,
 							iTJSDispatch2 *objthis)
 {
 	if(numparams < 1) return TJS_E_BADPARAMCOUNT;
+	if (result) result->Clear();
 
 	ttstr name = *param[0];
 
