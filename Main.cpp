@@ -289,14 +289,26 @@ ScriptsAdd::_getKeys(tTJSVariant *result, tTJSVariant &obj)
 {
 	if (result) {
 		iTJSDispatch2 *array = TJSCreateArrayObject();
-		DictMemberGetCaller *caller = new DictMemberGetCaller(array);
-		tTJSVariantClosure closure(caller);
-		obj.AsObjectClosureNoAddRef().EnumMembers(TJS_IGNOREPROP|TJS_ENUM_NO_VALUE, &closure, NULL);
+		DictMemberGetCaller *caller;
+		try {
+			caller = new DictMemberGetCaller(array);
+		} catch(...) {
+			array->Release();
+			throw;
+		}
+		try {
+			tTJSVariantClosure closure(caller);
+			obj.AsObjectClosureNoAddRef().EnumMembers(TJS_IGNOREPROP|TJS_ENUM_NO_VALUE, &closure, NULL);
+			static tjs_uint sortHint = 0;
+			// 返すキーはソートする
+			array->FuncCall(0, TJS_W("sort"), &sortHint, 0, 0, 0, array);
+			*result = tTJSVariant(array, array);
+		} catch(...) {
+			caller->Release();
+			array->Release();
+			throw;
+		}
 		caller->Release();
-		static tjs_uint sortHint = 0;
-		// 返すキーはソートする
-		array->FuncCall(0, TJS_W("sort"), &sortHint, 0, 0, 0, array);
-		*result = tTJSVariant(array, array);
 		array->Release();
 	}
 }
@@ -405,9 +417,15 @@ ScriptsAdd::equalStruct(tTJSVariant v1, tTJSVariant v2)
 			}
 			// 全項目を順番に比較
 			DictMemberCompareCaller *caller = new DictMemberCompareCaller(o2);
-			tTJSVariantClosure closure(caller);
-			tTJSVariant(o1.EnumMembers(TJS_IGNOREPROP, &closure, NULL));
-			bool result = caller->match;
+			bool result;
+			try {
+				tTJSVariantClosure closure(caller);
+				tTJSVariant(o1.EnumMembers(TJS_IGNOREPROP, &closure, NULL));
+				result = caller->match;
+			} catch(...) {
+				caller->Release();
+				throw;
+			}
 			caller->Release();
 			return result;
 		}
@@ -467,9 +485,15 @@ ScriptsAdd::equalStructNumericLoose(tTJSVariant v1, tTJSVariant v2)
 				return false;
 			// 全項目を順番に比較
 			DictMemberCompareNumericLooseCaller *caller = new DictMemberCompareNumericLooseCaller(o2);
-			tTJSVariantClosure closure(caller);
-			tTJSVariant(o1.EnumMembers(TJS_IGNOREPROP, &closure, NULL));
-			bool result = caller->match;
+			bool result;
+			try {
+				tTJSVariantClosure closure(caller);
+				tTJSVariant(o1.EnumMembers(TJS_IGNOREPROP, &closure, NULL));
+				result = caller->match;
+			} catch(...) {
+				caller->Release();
+				throw;
+			}
 			caller->Release();
 			return result;
 		}
@@ -508,45 +532,59 @@ ScriptsAdd::foreach(tTJSVariant *result,
 
 		tTJSVariant key, value;
 		tTJSVariant **paramList = new tTJSVariant *[numparams];
-		paramList[0] = &key;
-		paramList[1] = &value;
-		for (tjs_int i = 2; i < numparams; i++)
-			paramList[i] = param[i];
+		try {
+			paramList[0] = &key;
+			paramList[1] = &value;
+			for (tjs_int i = 2; i < numparams; i++)
+				paramList[i] = param[i];
 
-		tTJSVariant arrayCount;
-		(void)obj.PropGet(0, TJS_W("count"), &countHint, &arrayCount, NULL);
-		tjs_int count = arrayCount;
+			tTJSVariant arrayCount;
+			(void)obj.PropGet(0, TJS_W("count"), &countHint, &arrayCount, NULL);
+			tjs_int count = arrayCount;
 
-		tTJSVariant breakResult;
-		for (tjs_int i = 0; i < count; i++) {
-			key = i;
-			breakResult.Clear();
-			(void)obj.PropGetByNum(TJS_IGNOREPROP, i, &value, NULL);
-			(void)func->FuncCall(0, NULL, NULL, &breakResult, numparams, paramList, functhis);
-			if (breakResult.Type() != tvtVoid) {
-				break;
+			tTJSVariant breakResult;
+			for (tjs_int i = 0; i < count; i++) {
+				key = i;
+				breakResult.Clear();
+				(void)obj.PropGetByNum(TJS_IGNOREPROP, i, &value, NULL);
+				(void)func->FuncCall(0, NULL, NULL, &breakResult, numparams, paramList, functhis);
+				if (breakResult.Type() != tvtVoid) {
+					break;
+				}
 			}
+			if (result) {
+				*result = breakResult;
+			}
+		} catch(...) {
+			delete[] paramList;
+			throw;
 		}
-		if (result) {
-			*result = breakResult;
-		}
-		
 		delete[] paramList;
 
 	} else {
 
 		tTJSVariant **paramList = new tTJSVariant *[numparams];
-		for (tjs_int i = 2; i < numparams; i++)
-			paramList[i] = param[i];
-
-		DictIterateCaller *caller = new DictIterateCaller(func, functhis, paramList, numparams);
-		tTJSVariantClosure closure(caller);
-		obj.EnumMembers(TJS_IGNOREPROP, &closure, NULL);
-		if (result) {
-			*result = caller->breakResult;
+		DictIterateCaller *caller;
+		try {
+			for (tjs_int i = 2; i < numparams; i++)
+				paramList[i] = param[i];
+			caller = new DictIterateCaller(func, functhis, paramList, numparams);
+		} catch(...) {
+			delete[] paramList;
+			throw;
+		}
+		try {
+			tTJSVariantClosure closure(caller);
+			obj.EnumMembers(TJS_IGNOREPROP, &closure, NULL);
+			if (result) {
+				*result = caller->breakResult;
+			}
+		} catch(...) {
+			caller->Release();
+			delete[] paramList;
+			throw;
 		}
 		caller->Release();
-
 		delete[] paramList;
 	}
 	return TJS_S_OK;
@@ -625,28 +663,45 @@ ScriptsAdd::clone(tTJSVariant obj)
 		// Arrayの複製
 		if (o1.IsInstanceOf(0, NULL, NULL, TJS_W("Array"), NULL)== TJS_S_TRUE) {
 			iTJSDispatch2 *array = TJSCreateArrayObject();
-			tTJSVariant o1Count;
-			(void)o1.PropGet(0, TJS_W("count"), &countHint, &o1Count, NULL);
-			tjs_int count = o1Count;
-			tTJSVariant val;
-			tTJSVariant *args[] = {&val};
-			for (tjs_int i = 0; i < count; i++) {
-				(void)o1.PropGetByNum(TJS_IGNOREPROP, i, &val, NULL);
-				val = ScriptsAdd::clone(val);
-				static tjs_uint addHint = 0;
-				(void)array->FuncCall(0, TJS_W("add"), &addHint, 0, 1, args, array);
+			try {
+				tTJSVariant o1Count;
+				(void)o1.PropGet(0, TJS_W("count"), &countHint, &o1Count, NULL);
+				tjs_int count = o1Count;
+				tTJSVariant val;
+				tTJSVariant *args[] = {&val};
+				for (tjs_int i = 0; i < count; i++) {
+					(void)o1.PropGetByNum(TJS_IGNOREPROP, i, &val, NULL);
+					val = ScriptsAdd::clone(val);
+					static tjs_uint addHint = 0;
+					(void)array->FuncCall(0, TJS_W("add"), &addHint, 0, 1, args, array);
+				}
+				tTJSVariant result(array, array);
+				array->Release();
+				return result;
+			} catch(...) {
+				array->Release();
+				throw;
 			}
-			tTJSVariant result(array, array);
-			array->Release();
-			return result;
 		}
-		
+
 		// Dictionaryの複製
 		if (o1.IsInstanceOf(0, NULL, NULL, TJS_W("Dictionary"), NULL)== TJS_S_TRUE) {
 			iTJSDispatch2 *dict = TJSCreateDictionaryObject();
-			DictMemberCloneCaller *caller = new DictMemberCloneCaller(dict);
-			tTJSVariantClosure closure(caller);
-			o1.EnumMembers(TJS_IGNOREPROP, &closure, NULL);
+			DictMemberCloneCaller *caller;
+			try {
+				caller = new DictMemberCloneCaller(dict);
+			} catch(...) {
+				dict->Release();
+				throw;
+			}
+			try {
+				tTJSVariantClosure closure(caller);
+				o1.EnumMembers(TJS_IGNOREPROP, &closure, NULL);
+			} catch(...) {
+				caller->Release();
+				dict->Release();
+				throw;
+			}
 			caller->Release();
 			tTJSVariant result(dict, dict);
 			dict->Release();
