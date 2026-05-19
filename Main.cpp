@@ -2,8 +2,38 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include <set>
+#include <map>
+#include <utility>
 
 #include "bitap_fuzzy.hpp"
+
+//----------------------------------------------------------------------
+// 循環参照検出用 visited (thread_local + RAII)
+// equalStruct / clone の再帰中に同じ Dispatch ペア / Dispatch を再訪したら
+// 「等しい」もしくは「既存クローン」を返してスタックオーバーフロー回避。
+namespace {
+	struct EqualVisited {
+		typedef std::pair<iTJSDispatch2*, iTJSDispatch2*> KeyT;
+		typedef std::set<KeyT> SetT;
+		static thread_local int depth;
+		static thread_local SetT seen;
+		EqualVisited() { if (depth == 0) seen.clear(); ++depth; }
+		~EqualVisited() { --depth; if (depth == 0) seen.clear(); }
+	};
+	thread_local int EqualVisited::depth = 0;
+	thread_local EqualVisited::SetT EqualVisited::seen;
+
+	struct CloneVisited {
+		typedef std::map<iTJSDispatch2*, iTJSDispatch2*> MapT;
+		static thread_local int depth;
+		static thread_local MapT seen;
+		CloneVisited() { if (depth == 0) seen.clear(); ++depth; }
+		~CloneVisited() { --depth; if (depth == 0) seen.clear(); }
+	};
+	thread_local int CloneVisited::depth = 0;
+	thread_local CloneVisited::MapT CloneVisited::seen;
+}
 
 /**
  * メソッド追加用
@@ -370,11 +400,19 @@ ScriptsAdd::isNullContext(tTJSVariant obj)
 bool
 ScriptsAdd::equalStruct(tTJSVariant v1, tTJSVariant v2)
 {
+	EqualVisited scope;
 	// タイプがオブジェクトなら特殊判定
 	if (v1.Type() == tvtObject
 		&& v2.Type() == tvtObject) {
-		if (v1.AsObjectNoAddRef() == v2.AsObjectNoAddRef())
+		iTJSDispatch2 *p1 = v1.AsObjectNoAddRef();
+		iTJSDispatch2 *p2 = v2.AsObjectNoAddRef();
+		if (p1 == p2)
 			return true;
+
+		// 循環: 既に (p1,p2) を比較中なら同型とみなして true を返す
+		EqualVisited::KeyT key(p1, p2);
+		if (EqualVisited::seen.count(key)) return true;
+		EqualVisited::seen.insert(key);
 
 		tTJSVariantClosure &o1 = v1.AsObjectClosureNoAddRef();
 		tTJSVariantClosure &o2 = v2.AsObjectClosureNoAddRef();
@@ -439,11 +477,19 @@ ScriptsAdd::equalStruct(tTJSVariant v1, tTJSVariant v2)
 bool
 ScriptsAdd::equalStructNumericLoose(tTJSVariant v1, tTJSVariant v2)
 {
+	EqualVisited scope;
 	// タイプがオブジェクトなら特殊判定
 	if (v1.Type() == tvtObject
 		&& v2.Type() == tvtObject) {
-		if (v1.AsObjectNoAddRef() == v2.AsObjectNoAddRef())
+		iTJSDispatch2 *p1 = v1.AsObjectNoAddRef();
+		iTJSDispatch2 *p2 = v2.AsObjectNoAddRef();
+		if (p1 == p2)
 			return true;
+
+		// 循環: 既に (p1,p2) を比較中なら同型とみなして true を返す
+		EqualVisited::KeyT key(p1, p2);
+		if (EqualVisited::seen.count(key)) return true;
+		EqualVisited::seen.insert(key);
 
 		tTJSVariantClosure &o1 = v1.AsObjectClosureNoAddRef();
 		tTJSVariantClosure &o2 = v2.AsObjectClosureNoAddRef();
@@ -656,15 +702,26 @@ protected:
 tTJSVariant
 ScriptsAdd::clone(tTJSVariant obj)
 {
+	CloneVisited scope;
 	// タイプがオブジェクトなら細かく判定
 	if (obj.Type() == tvtObject) {
 
 		tTJSVariantClosure &o1 = obj.AsObjectClosureNoAddRef();
 		if (!o1.Object) return obj; // nullなら無視
 
+		// 循環: 既にクローン済の source なら同じクローンを返す
+		{
+			CloneVisited::MapT::iterator it = CloneVisited::seen.find(o1.Object);
+			if (it != CloneVisited::seen.end()) {
+				iTJSDispatch2 *cloned = it->second;
+				return tTJSVariant(cloned, cloned);
+			}
+		}
+
 		// Arrayの複製
 		if (o1.IsInstanceOf(0, NULL, NULL, TJS_W("Array"), NULL)== TJS_S_TRUE) {
 			iTJSDispatch2 *array = TJSCreateArrayObject();
+			CloneVisited::seen[o1.Object] = array;
 			try {
 				tTJSVariant o1Count;
 				(void)o1.PropGet(0, TJS_W("count"), &countHint, &o1Count, NULL);
@@ -689,6 +746,7 @@ ScriptsAdd::clone(tTJSVariant obj)
 		// Dictionaryの複製
 		if (o1.IsInstanceOf(0, NULL, NULL, TJS_W("Dictionary"), NULL)== TJS_S_TRUE) {
 			iTJSDispatch2 *dict = TJSCreateDictionaryObject();
+			CloneVisited::seen[o1.Object] = dict;
 			DictMemberCloneCaller *caller;
 			try {
 				caller = new DictMemberCloneCaller(dict);
