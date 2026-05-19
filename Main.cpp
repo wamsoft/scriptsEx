@@ -143,9 +143,9 @@ public:
 												iTJSDispatch2 *objthis		// object as "this"
 												) {
 		if (numparams > 1) {
-			tTVInteger flag = param[1]->AsInteger();
+			tTVInteger memberFlag = param[1]->AsInteger();
 			static tjs_uint addHint = 0;
-			if (!(flag & TJS_HIDDENMEMBER)) {
+			if (!(memberFlag & TJS_HIDDENMEMBER)) {
 				array->FuncCall(0, TJS_W("add"), &addHint, 0, 1, &param[0], array);
 			}
 		}
@@ -158,26 +158,6 @@ protected:
 	iTJSDispatch2 *array;
 };
 
-
-//----------------------------------------------------------------------
-// 辞書を作成
-tTJSVariant createDictionary(void)
-{
-	iTJSDispatch2 *obj = TJSCreateDictionaryObject();
-	tTJSVariant result(obj, obj);
-	obj->Release();
-	return result;
-}
-
-//----------------------------------------------------------------------
-// 配列を作成
-tTJSVariant createArray(void)
-{
-	iTJSDispatch2 *obj = TJSCreateArrayObject();
-	tTJSVariant result(obj, obj);
-	obj->Release();
-	return result;
-}
 
 //----------------------------------------------------------------------
 // 辞書の要素を全比較するCaller
